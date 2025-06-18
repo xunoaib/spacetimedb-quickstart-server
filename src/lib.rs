@@ -1,5 +1,22 @@
 use spacetimedb::{reducer, table, Identity, ReducerContext, Table, Timestamp};
 
+use spacetimedb::{client_visibility_filter, Filter};
+
+/// A client can only see their account
+#[client_visibility_filter]
+const ACCOUNT_FILTER: Filter = Filter::Sql("SELECT * FROM user WHERE identity = :sender");
+
+/// Only authorized clients can see messages
+#[client_visibility_filter]
+const MESSAGE_FILTER: Filter = Filter::Sql(
+    r#"
+    SELECT m.*
+    FROM message m
+    JOIN user u ON u.dummy_join = m.dummy_join
+    WHERE u.authorized = true AND u.identity = :sender
+"#,
+);
+
 #[table(name = user, public)]
 pub struct User {
     #[primary_key]
@@ -7,6 +24,7 @@ pub struct User {
     name: Option<String>,
     online: bool,
     authorized: bool,
+    dummy_join: bool, // workaround join restriction
 }
 
 #[table(name = message, public)]
@@ -14,6 +32,22 @@ pub struct Message {
     sender: Identity,
     sent: Timestamp,
     text: String,
+    dummy_join: bool, // workaround join restriction
+}
+
+#[spacetimedb::reducer(init)]
+/// Called when the module is initially published
+pub fn init(ctx: &ReducerContext) {
+    // Create an initial authorized user
+    let admin_hex_id = "c2009546b62e8bf62a4b1387664842c54821f56214e6e6897021091f3f5a053f";
+    let identity = Identity::from_hex(admin_hex_id).expect("Invalid hex string");
+    ctx.db.user().insert(User {
+        name: None,
+        identity: identity,
+        online: true,
+        authorized: true,
+        dummy_join: true,
+    });
 }
 
 #[reducer]
@@ -61,6 +95,7 @@ pub fn send_message(ctx: &ReducerContext, text: String) -> Result<(), String> {
         sender: ctx.sender,
         text,
         sent: ctx.timestamp,
+        dummy_join: true,
     });
     Ok(())
 }
@@ -84,10 +119,6 @@ pub fn client_connected(ctx: &ReducerContext) {
             online: true,
             ..user
         });
-
-        if !user.authorized {
-            log::warn!("Unauthorized user connected");
-        }
     } else {
         // If this is a new user, create a `User` row for the `Identity`,
         // which is online, but hasn't set a name.
@@ -96,7 +127,14 @@ pub fn client_connected(ctx: &ReducerContext) {
             identity: ctx.sender,
             online: true,
             authorized: false,
+            dummy_join: true,
         });
+    }
+
+    if let Some(user) = ctx.db.user().identity().find(ctx.sender) {
+        if !user.authorized {
+            log::warn!("Unauthorized user connected: {:?}", user.identity.to_hex());
+        }
     }
 }
 
