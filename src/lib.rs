@@ -6,6 +6,7 @@ pub struct User {
     identity: Identity,
     name: Option<String>,
     online: bool,
+    authorized: bool,
 }
 
 #[table(name = message, public)]
@@ -18,8 +19,10 @@ pub struct Message {
 #[reducer]
 /// Clients invoke this reducer to set their user names.
 pub fn set_name(ctx: &ReducerContext, name: String) -> Result<(), String> {
-    let name = validate_name(name)?;
+    validate_identity(ctx)?;
+
     if let Some(user) = ctx.db.user().identity().find(ctx.sender) {
+        let name = validate_name(name)?;
         ctx.db.user().identity().update(User {
             name: Some(name),
             ..user
@@ -27,6 +30,14 @@ pub fn set_name(ctx: &ReducerContext, name: String) -> Result<(), String> {
         Ok(())
     } else {
         Err("Cannot set name for unknown user".to_string())
+    }
+}
+
+fn validate_identity(ctx: &ReducerContext) -> Result<(), String> {
+    match ctx.db.user().identity().find(ctx.sender) {
+        Some(user) if user.authorized => Ok(()),
+        Some(_) => Err("Unauthorized user attempted to perform an action".to_string()),
+        None => Err("Validation failed: Unknown user".to_string()),
     }
 }
 
@@ -42,6 +53,8 @@ fn validate_name(name: String) -> Result<String, String> {
 #[reducer]
 /// Clients invoke this reducer to send messages.
 pub fn send_message(ctx: &ReducerContext, text: String) -> Result<(), String> {
+    validate_identity(ctx)?;
+
     let text = validate_message(text)?;
     log::info!("{}", text);
     ctx.db.message().insert(Message {
@@ -71,6 +84,10 @@ pub fn client_connected(ctx: &ReducerContext) {
             online: true,
             ..user
         });
+
+        if !user.authorized {
+            log::warn!("Unauthorized user connected");
+        }
     } else {
         // If this is a new user, create a `User` row for the `Identity`,
         // which is online, but hasn't set a name.
@@ -78,6 +95,7 @@ pub fn client_connected(ctx: &ReducerContext) {
             name: None,
             identity: ctx.sender,
             online: true,
+            authorized: false,
         });
     }
 }
